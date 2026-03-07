@@ -1,0 +1,26 @@
+name: download
+
+on:
+  workflow_dispatch:
+    inputs:
+      bookid:
+        description: 'fanqie book id'
+        required: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: install python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: install requirements
+        run: pip install requests bs4 lxml
+
+      - name: run downloader
+        run: python src/main.py ${{ github.event.inputs.bookid }}
