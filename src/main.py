@@ -303,7 +303,7 @@ class NovelDownloader:
             with tqdm(total=total_chapters, desc='下载进度') as pbar:
                 # Download chapters
                 content = existing_content.copy()  # Start with existing content including metadata
-                with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=self.config.xc) as executor:
                     future_to_chapter = {
                         executor.submit(
                             self._download_chapter,
