@@ -57,6 +57,7 @@ class NovelDownloader:
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/93.0.4577.63 Safari/537.36 Edg/93.0.961.47'}
         ]
         self.headers = random.choice(self.headers_lib)
+                     self.headers['Referer'] = 'https://fanqienovel.com/'
 
         # Use absolute paths based on script location
         self.script_dir = os.path.dirname(os.path.abspath(__file__))
