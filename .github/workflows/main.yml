@@ -23,4 +23,4 @@ jobs:
         run: pip install requests bs4 lxml
 
       - name: run downloader
-        run: python src/main.py ${{ github.event.inputs.bookid }}
+        run: python main.py ${{ github.event.inputs.bookid }}
