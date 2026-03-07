@@ -4,12 +4,21 @@ on:
   workflow_dispatch:
     inputs:
       bookid:
-        description: 'fanqie book id'
+        description: 'Fanqie book ID'
         required: true
+      save_mode:
+        description: 'Định dạng lưu file'
+        required: false
+        default: 'txt'
+        type: choice
+        options:
+          - txt
+          - epub
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 350
 
     steps:
       - uses: actions/checkout@v3
@@ -22,11 +31,30 @@ jobs:
       - name: install requirements
         run: pip install -r requirements.txt
 
+      - name: restore cookie cache
+        uses: actions/cache@v3
+        with:
+          path: src/data/
+          key: fanqie-cookie-${{ github.run_id }}
+          restore-keys: |
+            fanqie-cookie-
+
       - name: run downloader
-        run: python src/main.py ${{ github.event.inputs.bookid }}
+        run: python src/main.py ${{ github.event.inputs.bookid }} ${{ github.event.inputs.save_mode }}
 
       - name: upload result
         uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: novel
-          path: "*.txt"
+          name: novel-${{ github.event.inputs.bookid }}
+          path: |
+            *.txt
+            *.epub
+          retention-days: 7
+
+      - name: save cookie cache
+        uses: actions/cache/save@v3
+        if: always()
+        with:
+          path: src/data/
+          key: fanqie-cookie-${{ github.run_id }}
