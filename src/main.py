@@ -20,12 +20,10 @@ class SaveMode(Enum):
 
 @dataclass
 class Config:
-    kg: int = 0
-    kgf: str = '　'
     delay: List[int] = None
     save_path: str = './downloads'
     save_mode: SaveMode = SaveMode.EPUB
-    xc: int = 4  # Giảm luồng để tránh bị chặn
+    xc: int = 4
 
     def __post_init__(self):
         if self.delay is None:
@@ -52,9 +50,21 @@ class NovelDownloader:
         self.cookie = self._load_cookie()
 
         self.session = req.Session()
+        # Headers giống trình duyệt thật, bắt buộc có Accept: application/json
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+            'Accept-Encoding': 'gzip, deflate, br',
             'Referer': 'https://fanqienovel.com/',
+            'Origin': 'https://fanqienovel.com',
+            'X-Requested-With': 'XMLHttpRequest',
+            'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-origin',
             'Cookie': self.cookie,
         })
 
@@ -196,32 +206,30 @@ class NovelDownloader:
             raw = re_module.sub(r'\n{3,}', '\n\n', raw)
             return raw.strip()
 
-        # Thử từng API, log rõ response để debug
         apis = [
             f'https://fanqienovel.com/api/reader/full?itemIds={chapter_id}',
-            f'https://fanqienovel.com/api/reader/chapter/full?chapterId={chapter_id}&use_saj=1',
             f'https://fanqienovel.com/api/reader/full?itemIds={chapter_id}&readerType=1',
+            f'https://fanqienovel.com/api/reader/chapter/full?chapterId={chapter_id}&use_saj=1',
         ]
 
         for url in apis:
             try:
                 resp = self.session.get(url, timeout=15)
+                ct = resp.headers.get('Content-Type', '')
 
-                # Log 200 ký tự đầu để debug nếu không phải JSON
-                if 'json' not in resp.headers.get('Content-Type', ''):
-                    self.log(f'DEBUG non-JSON [{chapter_id}]: {resp.text[:200]}')
+                if 'json' not in ct:
+                    # Vẫn trả HTML — log status code để debug
+                    self.log(f'DEBUG [{chapter_id}] status={resp.status_code} CT={ct} body={resp.text[:80]}')
                     continue
 
                 data = resp.json()
                 code = data.get('code')
 
                 if code != 0:
-                    self.log(f'DEBUG code={code} msg={data.get("message","")} [{chapter_id}]')
+                    self.log(f'DEBUG code={code} msg={data.get("message", "")} [{chapter_id}]')
                     continue
 
                 d = data.get('data', {})
-
-                # Thử lấy content từ chapterDataList
                 ch_list = d.get('chapterDataList') or []
                 if ch_list and isinstance(ch_list, list):
                     raw_content = ch_list[0].get('chapterData', '')
@@ -237,10 +245,10 @@ class NovelDownloader:
                 self.log(f'DEBUG content rỗng [{chapter_id}] keys={list(d.keys())}')
 
             except req.exceptions.JSONDecodeError:
-                self.log(f'DEBUG JSONDecodeError [{chapter_id}] url={url} resp={resp.text[:200]}')
+                self.log(f'DEBUG JSONDecodeError [{chapter_id}]')
                 continue
             except Exception as e:
-                self.log(f'DEBUG err [{chapter_id}] url={url}: {e}')
+                self.log(f'DEBUG err [{chapter_id}]: {e}')
                 continue
 
         return None
