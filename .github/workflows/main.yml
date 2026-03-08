@@ -7,13 +7,13 @@ on:
         description: 'Fanqie book ID'
         required: true
       save_mode:
-        description: 'Định dạng lưu file'
+        description: 'Định dạng'
         required: false
-        default: 'txt'
+        default: 'epub'
         type: choice
         options:
-          - txt
           - epub
+          - txt
 
 jobs:
   build:
@@ -41,14 +41,13 @@ jobs:
 
       - name: run downloader
         run: python src/main.py ${{ github.event.inputs.bookid }} ${{ github.event.inputs.save_mode }}
+
       - name: upload result
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: novel-${{ github.event.inputs.bookid }}
-          path: |
-            *.txt
-            *.epub
+          path: downloads/
           retention-days: 7
 
       - name: save cookie cache
