@@ -224,6 +224,7 @@ class NovelDownloader:
             ch_data = data.get('data', {}).get('chapterData', {})
             title = (ch_data.get('chapterTitle') or ch_data.get('title') or '').strip()
             content = ch_data.get('content') or ''
+            self.log(f'DEBUG {chapter_id}: title={title!r} len={len(content)}')
             if not content:
                 return None
             return title, self._decode_content(content)
