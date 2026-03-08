@@ -314,6 +314,8 @@ class NovelDownloader:
                             existing[ch_id] = (title, content)
                     except Exception as e:
                         self.log(f'✗ Lỗi: {e}')
+                        import traceback
+                        self.log(traceback.format_exc())
 
                     completed += 1
                     pbar.update(1)
