@@ -212,7 +212,31 @@ class NovelDownloader:
     # API - TẢI CHƯƠNG
     # ──────────────────────────────────────────────
     def _fetch_chapter(self, chapter_id: str) -> Optional[Tuple[str, str]]:
-        """Tải 1 chương, trả về (title, content) hoặc None"""
+        """Tải 1 chương dùng API từ ref_main.py, trả về (title, content) hoặc None"""
+        import re as re_module
+
+        # API chính — không cần cookie, không cần decode charset
+        api_url = f'http://yuefanqie.jingluo.love/content?item_id={chapter_id}'
+        try:
+            resp = req.get(api_url, headers=self.headers, timeout=20)
+            data = resp.json()
+            if data.get('code') == 0:
+                raw = data.get('data', {}).get('content', '')
+                if raw:
+                    # Xử lý HTML như ref_main.py
+                    raw = re_module.sub(r'<header>.*?</header>', '', raw, flags=re_module.DOTALL)
+                    raw = re_module.sub(r'<footer>.*?</footer>', '', raw, flags=re_module.DOTALL)
+                    raw = re_module.sub(r'</?article>', '', raw)
+                    raw = re_module.sub(r'<p id="\d+">', '\n', raw)
+                    raw = re_module.sub(r'</p>', '', raw)
+                    raw = re_module.sub(r'<[^>]+>', '', raw)
+                    raw = re_module.sub(r'\n{3,}', '\n\n', raw).strip()
+                    title = (data.get('data', {}).get('chapterTitle') or '').strip()
+                    return title, raw
+        except Exception:
+            pass
+
+        # Fallback: API fanqienovel.com + decode charset
         url = f'https://fanqienovel.com/api/reader/full?itemId={chapter_id}'
         headers = {**self.headers, 'Cookie': self.cookie}
         try:
@@ -224,7 +248,6 @@ class NovelDownloader:
             ch_data = data.get('data', {}).get('chapterData', {})
             title = (ch_data.get('chapterTitle') or ch_data.get('title') or '').strip()
             content = ch_data.get('content') or ''
-            self.log(f'DEBUG {chapter_id}: title={title!r} len={len(content)}')
             if not content:
                 return None
             return title, self._decode_content(content)
@@ -296,31 +319,29 @@ class NovelDownloader:
         total = len(chapters)
         completed = 0
         results = {}  # {index: (title, content)}
+        chapter_items = list(chapters.items())
 
         with tqdm(total=total, desc='Tải chương', unit='ch') as pbar:
             with concurrent.futures.ThreadPoolExecutor(max_workers=self.config.xc) as executor:
+                # FIX: lưu cả (idx, ch_id) vào futures dict
                 futures = {
-                    executor.submit(self._download_chapter, idx, ch_id, existing): idx
-                    for idx, ch_id in chapters.items()
+                    executor.submit(self._download_chapter, idx, ch_id, existing): (idx, ch_id)
+                    for idx, ch_id in chapter_items
                 }
                 for future in concurrent.futures.as_completed(futures):
+                    idx_str, ch_id_key = futures[future]
                     try:
                         result = future.result()
                         if result:
-                            i, title, content = result
-                            results[i] = (title, content)
-                            # Lưu cache theo ch_id
-                            ch_id = chapters[str(i)]
-                            existing[ch_id] = (title, content)
+                            i, title, ch_content = result
+                            results[i] = (title, ch_content)
+                            existing[ch_id_key] = (title, ch_content)
                     except Exception as e:
-                        self.log(f'✗ Lỗi: {e}')
-                        import traceback
-                        self.log(traceback.format_exc())
+                        self.log(f'✗ [{idx_str}] Lỗi: {e}')
 
                     completed += 1
                     pbar.update(1)
 
-                    # Lưu tiến độ mỗi 20 chương
                     if completed % 20 == 0:
                         with open(json_path, 'w', encoding='UTF-8') as f:
                             json.dump(existing, f, ensure_ascii=False)
