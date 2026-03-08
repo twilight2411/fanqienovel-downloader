@@ -40,7 +40,7 @@ jobs:
             fanqie-cookie-
 
       - name: run downloader
-        run: python src/main.py --id ${{ github.event.inputs.bookid }} --mode ${{ github.event.inputs.save_mode }}
+        run: python src/main.py ${{ github.event.inputs.bookid }} ${{ github.event.inputs.save_mode }}
       - name: upload result
         uses: actions/upload-artifact@v4
         if: always()
