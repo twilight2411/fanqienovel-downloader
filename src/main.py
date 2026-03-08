@@ -205,33 +205,18 @@ class NovelDownloader:
             raw = re_module.sub(r'<[^>]+>', '', raw)
             return re_module.sub(r'\n{3,}', '\n\n', raw).strip()
 
-        # API 1: fanqienovel.com (nhanh hơn)
-        url = f'https://fanqienovel.com/api/reader/full?itemId={chapter_id}'
-        headers = {**self.headers, 'Cookie': self.cookie}
-        try:
-            resp = req.get(url, headers=headers, timeout=10)
-            data = resp.json()
-            if data.get('code') == 0:
-                ch_data = data.get('data', {}).get('chapterData', {})
-                title = (ch_data.get('chapterTitle') or '').strip()
-                content = ch_data.get('content') or ''
-                if content:
-                    return title, self._decode_content(content)
-        except Exception:
-            pass
-
-        # API 2: yuefanqie.jingluo.love (fallback)
+        # API chính: yuefanqie.jingluo.love (không cần cookie)
         try:
             api_url = f'http://yuefanqie.jingluo.love/content?item_id={chapter_id}'
-            resp = req.get(api_url, headers=self.headers, timeout=10)
+            resp = req.get(api_url, headers=self.headers, timeout=8)
             data = resp.json()
             if data.get('code') == 0:
                 raw = data.get('data', {}).get('content', '')
                 if raw:
                     title = (data.get('data', {}).get('chapterTitle') or '').strip()
                     return title, clean_html(raw)
-        except Exception:
-            pass
+        except Exception as e:
+            self.log(f'DEBUG yuefanqie err {chapter_id}: {e}')
 
         return None
 
@@ -264,6 +249,8 @@ class NovelDownloader:
                 title, content = result
                 time.sleep(random.randint(self.config.delay[0], self.config.delay[1]) / 1000)
                 return int(idx), title, content
+            if attempt == 0:
+                self.log(f'DEBUG fetch None for {ch_id}')
             time.sleep(1)
         return None
 
