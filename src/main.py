@@ -80,27 +80,8 @@ class NovelDownloader:
 
     def _generate_cookie(self) -> str:
         bas = 1000000000000000000
-        max_attempts = 50
-        start = random.randint(bas * 6, bas * 8)
-        self.log(f'Đang tạo cookie (tối đa {max_attempts} lần)...')
-
-        for attempt in range(max_attempts):
-            cookie = f'novel_web_id={start + attempt}'
-            try:
-                url = 'https://fanqienovel.com/api/reader/full?itemId=7143038691944959011'
-                headers = {**self.headers, 'Cookie': cookie}
-                resp = req.get(url, headers=headers, timeout=10)
-                data = resp.json()
-                if data.get('code') == 0:
-                    self.log(f'Cookie hợp lệ sau {attempt + 1} lần.')
-                    self._save_cookie(cookie)
-                    return cookie
-            except Exception:
-                continue
-            time.sleep(0.1)
-
         cookie = f'novel_web_id={random.randint(bas * 7, bas * 8)}'
-        self.log('Dùng cookie ngẫu nhiên (fallback).')
+        self.log('Tạo cookie ngẫu nhiên.')
         self._save_cookie(cookie)
         return cookie
 
@@ -212,47 +193,47 @@ class NovelDownloader:
     # API - TẢI CHƯƠNG
     # ──────────────────────────────────────────────
     def _fetch_chapter(self, chapter_id: str) -> Optional[Tuple[str, str]]:
-        """Tải 1 chương dùng API từ ref_main.py, trả về (title, content) hoặc None"""
+        """Tải 1 chương, trả về (title, content) hoặc None"""
         import re as re_module
 
-        # API chính — không cần cookie, không cần decode charset
-        api_url = f'http://yuefanqie.jingluo.love/content?item_id={chapter_id}'
+        def clean_html(raw):
+            raw = re_module.sub(r'<header>.*?</header>', '', raw, flags=re_module.DOTALL)
+            raw = re_module.sub(r'<footer>.*?</footer>', '', raw, flags=re_module.DOTALL)
+            raw = re_module.sub(r'</?article>', '', raw)
+            raw = re_module.sub(r'<p id="\d+">', '\n', raw)
+            raw = re_module.sub(r'</p>', '', raw)
+            raw = re_module.sub(r'<[^>]+>', '', raw)
+            return re_module.sub(r'\n{3,}', '\n\n', raw).strip()
+
+        # API 1: fanqienovel.com (nhanh hơn)
+        url = f'https://fanqienovel.com/api/reader/full?itemId={chapter_id}'
+        headers = {**self.headers, 'Cookie': self.cookie}
         try:
-            resp = req.get(api_url, headers=self.headers, timeout=20)
+            resp = req.get(url, headers=headers, timeout=10)
+            data = resp.json()
+            if data.get('code') == 0:
+                ch_data = data.get('data', {}).get('chapterData', {})
+                title = (ch_data.get('chapterTitle') or '').strip()
+                content = ch_data.get('content') or ''
+                if content:
+                    return title, self._decode_content(content)
+        except Exception:
+            pass
+
+        # API 2: yuefanqie.jingluo.love (fallback)
+        try:
+            api_url = f'http://yuefanqie.jingluo.love/content?item_id={chapter_id}'
+            resp = req.get(api_url, headers=self.headers, timeout=10)
             data = resp.json()
             if data.get('code') == 0:
                 raw = data.get('data', {}).get('content', '')
                 if raw:
-                    # Xử lý HTML như ref_main.py
-                    raw = re_module.sub(r'<header>.*?</header>', '', raw, flags=re_module.DOTALL)
-                    raw = re_module.sub(r'<footer>.*?</footer>', '', raw, flags=re_module.DOTALL)
-                    raw = re_module.sub(r'</?article>', '', raw)
-                    raw = re_module.sub(r'<p id="\d+">', '\n', raw)
-                    raw = re_module.sub(r'</p>', '', raw)
-                    raw = re_module.sub(r'<[^>]+>', '', raw)
-                    raw = re_module.sub(r'\n{3,}', '\n\n', raw).strip()
                     title = (data.get('data', {}).get('chapterTitle') or '').strip()
-                    return title, raw
+                    return title, clean_html(raw)
         except Exception:
             pass
 
-        # Fallback: API fanqienovel.com + decode charset
-        url = f'https://fanqienovel.com/api/reader/full?itemId={chapter_id}'
-        headers = {**self.headers, 'Cookie': self.cookie}
-        try:
-            resp = req.get(url, headers=headers, timeout=20)
-            resp.raise_for_status()
-            data = resp.json()
-            if data.get('code') != 0:
-                return None
-            ch_data = data.get('data', {}).get('chapterData', {})
-            title = (ch_data.get('chapterTitle') or ch_data.get('title') or '').strip()
-            content = ch_data.get('content') or ''
-            if not content:
-                return None
-            return title, self._decode_content(content)
-        except Exception:
-            return None
+        return None
 
     def _decode_content(self, content: str) -> str:
         result = []
