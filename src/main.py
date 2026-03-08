@@ -8,7 +8,7 @@ import random
 import os
 import sys
 import concurrent.futures
-from typing import Callable, Optional, Dict, List
+from typing import Callable, Optional, Dict, List, Tuple
 from dataclasses import dataclass
 from enum import Enum
 
@@ -23,13 +23,13 @@ class Config:
     kg: int = 0
     kgf: str = '　'
     delay: List[int] = None
-    save_path: str = '.'
-    save_mode: SaveMode = SaveMode.SINGLE_TXT
-    xc: int = 5  # Giảm luồng để tránh bị chặn IP trên GitHub Actions
+    save_path: str = './downloads'
+    save_mode: SaveMode = SaveMode.EPUB  # Mặc định epub
+    xc: int = 16  # 16 luồng
 
     def __post_init__(self):
         if self.delay is None:
-            self.delay = [300, 800]
+            self.delay = [50, 150]  # Delay ngắn hơn
 
 
 class NovelDownloader:
@@ -65,36 +65,33 @@ class NovelDownloader:
         os.makedirs(self.config.save_path, exist_ok=True)
 
     # ──────────────────────────────────────────────
-    # COOKIE — FIX: không loop vô tận
+    # COOKIE
     # ──────────────────────────────────────────────
     def _load_or_create_cookie(self) -> str:
         if os.path.exists(self.cookie_path):
             try:
                 with open(self.cookie_path, 'r', encoding='UTF-8') as f:
                     cookie = json.load(f)
-                self.log(f'Dùng cookie cũ.')
+                self.log('Dùng cookie cũ.')
                 return cookie
             except Exception:
                 pass
         return self._generate_cookie()
 
     def _generate_cookie(self) -> str:
-        """
-        FIX CHÍNH: Giới hạn 50 lần thử thay vì loop hàng tỷ lần.
-        Code gốc dùng range(bas*6, bas*9) → timeout GitHub Actions.
-        """
         bas = 1000000000000000000
         max_attempts = 50
         start = random.randint(bas * 6, bas * 8)
-
         self.log(f'Đang tạo cookie (tối đa {max_attempts} lần)...')
 
         for attempt in range(max_attempts):
             cookie = f'novel_web_id={start + attempt}'
             try:
-                # Test nhanh với chapter cố định
-                result = self._fetch_chapter_raw('7143038691944959011', cookie)
-                if result and len(result) > 200:
+                url = 'https://fanqienovel.com/api/reader/full?itemId=7143038691944959011'
+                headers = {**self.headers, 'Cookie': cookie}
+                resp = req.get(url, headers=headers, timeout=10)
+                data = resp.json()
+                if data.get('code') == 0:
                     self.log(f'Cookie hợp lệ sau {attempt + 1} lần.')
                     self._save_cookie(cookie)
                     return cookie
@@ -102,7 +99,6 @@ class NovelDownloader:
                 continue
             time.sleep(0.1)
 
-        # Fallback — không loop mãi
         cookie = f'novel_web_id={random.randint(bas * 7, bas * 8)}'
         self.log('Dùng cookie ngẫu nhiên (fallback).')
         self._save_cookie(cookie)
@@ -116,28 +112,36 @@ class NovelDownloader:
             pass
 
     # ──────────────────────────────────────────────
-    # API
+    # API - LẤY THÔNG TIN TRUYỆN
     # ──────────────────────────────────────────────
-    def _get_book_info(self, novel_id: str):
-        """Lấy tên và trạng thái truyện"""
-        for url in [
+    def _get_book_info(self, novel_id: str) -> Tuple[str, str, str]:
+        """Lấy tên truyện, tác giả, trạng thái"""
+        # Thử API info trực tiếp
+        urls = [
+            f'https://fanqienovel.com/api/reader/info?bookId={novel_id}',
             f'https://fanqienovel.com/api/author/book/info?bookId={novel_id}',
-            f'https://fanqienovel.com/page/{novel_id}',
-        ]:
+        ]
+        for url in urls:
             try:
                 resp = req.get(url, headers=self.headers, timeout=15)
                 data = resp.json()
                 if data.get('code') == 0:
                     d = data.get('data', {})
-                    name = d.get('bookName') or d.get('book_name') or d.get('name') or 'Unknown'
-                    status = d.get('bookStatus') or d.get('book_status') or '?'
-                    if name != 'Unknown':
-                        return name, status
+                    name = (d.get('bookName') or d.get('book_name') or
+                            d.get('name') or '').strip()
+                    author = (d.get('authorName') or d.get('author_name') or
+                              d.get('author') or '').strip()
+                    status = str(d.get('bookStatus') or d.get('book_status') or '?')
+                    if name:
+                        return name, author, status
             except Exception:
                 continue
-        return 'Unknown', '?'
+
+        # Fallback: lấy từ chapter đầu tiên
+        return '', '', '?'
 
     def _get_chapter_list(self, novel_id: str):
+        """Lấy danh sách chương, trả về (name, author, chapters_dict, status)"""
         url = f'https://fanqienovel.com/api/reader/directory/detail?bookId={novel_id}'
         try:
             resp = req.get(url, headers=self.headers, timeout=20)
@@ -145,70 +149,72 @@ class NovelDownloader:
             data = resp.json()
 
             if data.get('code') != 0:
-                self.log(f'API lỗi: code={data.get("code")} msg={data.get("msg","")}')
-                return 'err', {}, []
+                self.log(f'API lỗi: code={data.get("code")}')
+                return 'err', '', {}, []
 
             raw = data.get('data', {})
 
-            # Cấu trúc MỚI: allItemIds — chỉ có list ID, không có tên chương
+            # Lấy tên + tác giả
+            name, author, status = self._get_book_info(novel_id)
+
+            # Cấu trúc allItemIds
             if isinstance(raw, dict) and 'allItemIds' in raw:
                 all_ids = [str(i).strip() for i in (raw.get('allItemIds') or []) if i]
-                self.log(f'Tìm thấy {len(all_ids)} chương (dạng allItemIds)')
+                self.log(f'Tìm thấy {len(all_ids)} chương')
+                # chapters: {index: ch_id} để giữ thứ tự
+                chapters = {str(i): ch_id for i, ch_id in enumerate(all_ids)}
+                return name or 'Unknown', author, chapters, [status]
 
-                name, book_status = self._get_book_info(novel_id)
-                # Key = "Chương N|id" để giữ thứ tự và biết ID
-                chapters = {f'Chương {i+1}|{ch_id}': ch_id for i, ch_id in enumerate(all_ids)}
-                self.log(f'Truyện: 《{name}》| {len(chapters)} chương')
-                return name, chapters, [book_status]
-
-            # Cấu trúc CŨ: list volume
+            # Cấu trúc list volume cũ
             elif isinstance(raw, list):
-                name, book_status = self._get_book_info(novel_id)
                 chapters = {}
+                idx = 0
                 for item in raw:
                     if isinstance(item, dict):
                         for ch in (item.get('chapterList') or []):
                             if isinstance(ch, dict):
-                                title = (ch.get('chapterTitle') or '').strip()
                                 ch_id = str(ch.get('chapterId') or '')
-                                if title and ch_id:
-                                    chapters[title] = ch_id
-                self.log(f'Truyện: 《{name}》| {len(chapters)} chương')
-                return name, chapters, [book_status]
+                                if ch_id:
+                                    chapters[str(idx)] = ch_id
+                                    idx += 1
+                return name or 'Unknown', author, chapters, [status]
 
             # Cấu trúc dict thông thường
             elif isinstance(raw, dict):
-                name = raw.get('bookName') or 'Unknown'
-                status = [raw.get('bookStatus') or '?']
+                if not name:
+                    name = raw.get('bookName') or 'Unknown'
                 chapters = {}
+                idx = 0
                 for vol in (raw.get('chapterListWithVolume') or []):
                     if isinstance(vol, dict):
                         for ch in (vol.get('chapterList') or []):
                             if isinstance(ch, dict):
-                                title = (ch.get('chapterTitle') or '').strip()
                                 ch_id = str(ch.get('chapterId') or '')
-                                if title and ch_id:
-                                    chapters[title] = ch_id
-                self.log(f'Truyện: 《{name}》| {len(chapters)} chương')
-                return name, chapters, status
+                                if ch_id:
+                                    chapters[str(idx)] = ch_id
+                                    idx += 1
+                return name or 'Unknown', author, chapters, [status]
 
             else:
-                self.log(f'Cấu trúc API lạ: {type(raw)}, keys={list(raw.keys()) if isinstance(raw,dict) else "N/A"}')
-                return 'err', {}, []
+                self.log(f'Cấu trúc API lạ: {type(raw)}')
+                return 'err', '', {}, []
 
         except req.Timeout:
             self.log('Timeout lấy danh sách chương')
-            return 'err', {}, []
+            return 'err', '', {}, []
         except Exception as e:
-            self.log(f'Lỗi lấy chương: {e}')
+            self.log(f'Lỗi: {e}')
             import traceback
             self.log(traceback.format_exc())
-            return 'err', {}, []
+            return 'err', '', {}, []
 
-    def _fetch_chapter_raw(self, chapter_id: str, cookie: str):
-        """Trả về (title, content) hoặc None"""
+    # ──────────────────────────────────────────────
+    # API - TẢI CHƯƠNG
+    # ──────────────────────────────────────────────
+    def _fetch_chapter(self, chapter_id: str) -> Optional[Tuple[str, str]]:
+        """Tải 1 chương, trả về (title, content) hoặc None"""
         url = f'https://fanqienovel.com/api/reader/full?itemId={chapter_id}'
-        headers = {**self.headers, 'Cookie': cookie}
+        headers = {**self.headers, 'Cookie': self.cookie}
         try:
             resp = req.get(url, headers=headers, timeout=20)
             resp.raise_for_status()
@@ -216,21 +222,13 @@ class NovelDownloader:
             if data.get('code') != 0:
                 return None
             ch_data = data.get('data', {}).get('chapterData', {})
-            title = ch_data.get('chapterTitle') or ch_data.get('title') or ''
+            title = (ch_data.get('chapterTitle') or ch_data.get('title') or '').strip()
             content = ch_data.get('content') or ''
-            return title.strip(), content
+            if not content:
+                return None
+            return title, self._decode_content(content)
         except Exception:
             return None
-
-    def _download_chapter_content(self, chapter_id: str):
-        """Trả về (real_title, decoded_content) hoặc None"""
-        result = self._fetch_chapter_raw(chapter_id, self.cookie)
-        if not result:
-            return None
-        title, raw = result
-        if not raw:
-            return None
-        return title, self._decode_content(raw)
 
     def _decode_content(self, content: str) -> str:
         result = []
@@ -248,132 +246,129 @@ class NovelDownloader:
                 result.append(char)
         return ''.join(result)
 
-    # ──────────────────────────────────────────────
-    # DOWNLOAD
-    # ──────────────────────────────────────────────
-    def _download_chapter(self, title: str, ch_id: str, existing: Dict):
-        """Trả về (real_title, content) hoặc None"""
-        if title in existing:
-            return title, existing[title]
+    def _download_chapter(self, idx: str, ch_id: str, existing: Dict) -> Optional[Tuple[int, str, str]]:
+        """Tải 1 chương với retry, trả về (index, title, content)"""
+        # Resume: kiểm tra đã có chưa
+        if ch_id in existing:
+            title, content = existing[ch_id]
+            return int(idx), title, content
 
         for attempt in range(3):
-            try:
-                result = self._download_chapter_content(ch_id)
-                if result:
-                    real_title, content = result
-                    # Dùng tên thật từ API nếu có, không thì dùng tên tạm bỏ |id
-                    final_title = real_title if real_title else title.split('|')[0]
-                    time.sleep(random.randint(self.config.delay[0], self.config.delay[1]) / 1000)
-                    return final_title, content
-            except Exception:
-                pass
-            time.sleep(2)
+            result = self._fetch_chapter(ch_id)
+            if result:
+                title, content = result
+                time.sleep(random.randint(self.config.delay[0], self.config.delay[1]) / 1000)
+                return int(idx), title, content
+            time.sleep(1)
         return None
 
+    # ──────────────────────────────────────────────
+    # DOWNLOAD MAIN
+    # ──────────────────────────────────────────────
     def download_novel(self, novel_id: str) -> str:
         novel_id = str(novel_id).strip()
         self.log(f'\n{"="*50}')
-        self.log(f'ID truyện: {novel_id}')
+        self.log(f'ID: {novel_id}')
 
-        name, chapters, status = self._get_chapter_list(novel_id)
+        name, author, chapters, status = self._get_chapter_list(novel_id)
         if name == 'err':
-            self.log('Không lấy được thông tin truyện. Kiểm tra lại ID.')
+            self.log('Không lấy được thông tin truyện.')
             return 'err'
 
-        safe_name = self._sanitize_filename(name)
+        self.log(f'Truyện: 《{name}》')
+        self.log(f'Tác giả: {author if author else "?"}')
         self.log(f'Trạng thái: {status[0]} | Tổng: {len(chapters)} chương')
 
-        # Resume — load chương đã tải
+        safe_name = self._sanitize_filename(name)
+
+        # Resume: load dữ liệu cũ {ch_id: (title, content)}
         json_path = os.path.join(self.bookstore_dir, f'{safe_name}.json')
         existing = {}
         if os.path.exists(json_path):
-            with open(json_path, 'r', encoding='UTF-8') as f:
-                existing = json.load(f)
-            self.log(f'Resume: đã có {len(existing)}/{len(chapters)} chương.')
+            try:
+                with open(json_path, 'r', encoding='UTF-8') as f:
+                    existing = json.load(f)
+                self.log(f'Resume: đã có {len(existing)}/{len(chapters)} chương.')
+            except Exception:
+                pass
 
-        chapter_list = list(chapters.items())
-        total = len(chapter_list)
-        content = dict(existing)
+        total = len(chapters)
         completed = 0
-
-        # Dùng dict có thứ tự để lưu (real_title -> content)
-        ordered_content = {}  # giữ thứ tự chương đúng
+        results = {}  # {index: (title, content)}
 
         with tqdm(total=total, desc='Tải chương', unit='ch') as pbar:
             with concurrent.futures.ThreadPoolExecutor(max_workers=self.config.xc) as executor:
                 futures = {
-                    executor.submit(self._download_chapter, title, ch_id, existing): (i, title)
-                    for i, (title, ch_id) in enumerate(chapter_list)
+                    executor.submit(self._download_chapter, idx, ch_id, existing): idx
+                    for idx, ch_id in chapters.items()
                 }
-                results_by_index = {}
                 for future in concurrent.futures.as_completed(futures):
-                    i, title = futures[future]
                     try:
                         result = future.result()
                         if result:
-                            real_title, ch_content = result
-                            results_by_index[i] = (real_title, ch_content)
-                            content[title] = ch_content  # lưu tạm theo key cũ để resume
+                            i, title, content = result
+                            results[i] = (title, content)
+                            # Lưu cache theo ch_id
+                            ch_id = chapters[str(i)]
+                            existing[ch_id] = (title, content)
                     except Exception as e:
-                        self.log(f'✗ [{title}]: {e}')
+                        self.log(f'✗ Lỗi: {e}')
 
                     completed += 1
                     pbar.update(1)
 
-                    if completed % 10 == 0:
+                    # Lưu tiến độ mỗi 20 chương
+                    if completed % 20 == 0:
                         with open(json_path, 'w', encoding='UTF-8') as f:
-                            json.dump(content, f, ensure_ascii=False)
+                            json.dump(existing, f, ensure_ascii=False)
 
-        # Sắp xếp lại đúng thứ tự và dùng tên thật
-        for i in sorted(results_by_index.keys()):
-            real_title, ch_content = results_by_index[i]
-            ordered_content[real_title] = ch_content
-
-        # Lưu JSON cuối (dùng tên thật)
+        # Lưu JSON cuối
         with open(json_path, 'w', encoding='UTF-8') as f:
-            json.dump(ordered_content, f, ensure_ascii=False, indent=2)
+            json.dump(existing, f, ensure_ascii=False, indent=2)
 
-        self.log(f'Hoàn thành: {len(ordered_content)}/{total} chương')
+        # Sắp xếp đúng thứ tự
+        ordered = [(results[i][0], results[i][1]) for i in sorted(results.keys())]
+        self.log(f'Hoàn thành: {len(ordered)}/{total} chương')
 
-        if self.config.save_mode == SaveMode.SINGLE_TXT:
-            return self._save_single_txt(safe_name, ordered_content)
-        elif self.config.save_mode == SaveMode.EPUB:
-            return self._save_epub(name, safe_name, chapters, content)
-        return 's'
+        if self.config.save_mode == SaveMode.EPUB:
+            return self._save_epub(name, author, safe_name, ordered)
+        else:
+            return self._save_txt(safe_name, ordered)
 
     # ──────────────────────────────────────────────
     # SAVE
     # ──────────────────────────────────────────────
-    @staticmethod
-    def _display_title(title: str) -> str:
-        """Bỏ phần |id khỏi tên chương nếu có (dạng allItemIds)"""
-        return title.split('|')[0] if '|' in title else title
-
-    def _save_single_txt(self, name: str, content: Dict) -> str:
-        out = os.path.join(self.config.save_path, f'{name}.txt')
+    def _save_txt(self, safe_name: str, chapters: List[Tuple[str, str]]) -> str:
+        out = os.path.join(self.config.save_path, f'{safe_name}.txt')
         with open(out, 'w', encoding='UTF-8') as f:
-            for title, ch_content in content.items():
-                f.write(f'\n{title}\n')
-                f.write(ch_content)
+            for title, content in chapters:
+                f.write(f'\n{title}\n\n')
+                f.write(content)
                 f.write('\n')
         self.log(f'✓ Lưu TXT: {out}')
         return 's'
 
-    def _save_epub(self, name: str, safe_name: str, chapters: Dict, content: Dict) -> str:
+    def _save_epub(self, name: str, author: str, safe_name: str,
+                   chapters: List[Tuple[str, str]]) -> str:
         book = epub.EpubBook()
         book.set_title(name)
         book.set_language('zh')
+        if author:
+            book.add_author(author)
 
         epub_chs = []
-        for i, title in enumerate(chapters):
-            if title not in content:
-                continue
-            ch = epub.EpubHtml(title=title, file_name=f'ch_{i:04d}.xhtml', lang='zh')
+        for i, (title, content) in enumerate(chapters):
+            ch = epub.EpubHtml(
+                title=title or f'Chương {i+1}',
+                file_name=f'ch_{i:04d}.xhtml',
+                lang='zh'
+            )
             body = ''.join(
                 f'<p>{p.strip()}</p>'
-                for p in content[title].split('\n') if p.strip()
+                for p in content.split('\n') if p.strip()
             )
-            ch.content = f'<h1>{title}</h1>{body}'
+            display_title = title or f'Chương {i+1}'
+            ch.content = f'<h1>{display_title}</h1>{body}'
             book.add_item(ch)
             epub_chs.append(ch)
 
@@ -389,33 +384,35 @@ class NovelDownloader:
 
     @staticmethod
     def _sanitize_filename(name: str) -> str:
+        if not name:
+            return 'Unknown'
         for c in r'\/:*?"<>|':
             name = name.replace(c, '_')
-        return name.strip()
+        return name.strip() or 'Unknown'
 
 
 # ──────────────────────────────────────────────
 # ENTRY POINT
-# Cách dùng: python src/main.py <book_id> [txt|epub]
+# python src/main.py <book_id> [epub|txt]
 # ──────────────────────────────────────────────
 if __name__ == '__main__':
     if len(sys.argv) < 2:
-        print('Cách dùng: python src/main.py <book_id> [txt|epub]')
+        print('Cách dùng: python src/main.py <book_id> [epub|txt]')
         sys.exit(1)
 
     novel_id = sys.argv[1]
-    mode_arg = sys.argv[2] if len(sys.argv) > 2 else 'txt'
-
-    save_mode = SaveMode.EPUB if mode_arg == 'epub' else SaveMode.SINGLE_TXT
+    mode_arg = sys.argv[2] if len(sys.argv) > 2 else 'epub'
+    save_mode = SaveMode.SINGLE_TXT if mode_arg == 'txt' else SaveMode.EPUB
 
     config = Config(
-        save_path='.',        # Lưu ra thư mục gốc để actions/upload-artifact@v4 tìm thấy *.txt
+        save_path='./downloads',
         save_mode=save_mode,
-        xc=5,
-        delay=[300, 800],
+        xc=16,          # 16 luồng — nhanh hơn 3-4x
+        delay=[50, 150], # Delay ngắn
     )
+
+    os.makedirs('./downloads', exist_ok=True)
 
     downloader = NovelDownloader(config)
     result = downloader.download_novel(novel_id)
-
     sys.exit(0 if result == 's' else 1)
