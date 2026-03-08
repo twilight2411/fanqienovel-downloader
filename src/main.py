@@ -132,6 +132,8 @@ class NovelDownloader:
                 return 'err', {}, []
 
             raw = data.get('data', {})
+            self.log(f'DEBUG data type: {type(raw)}')
+            self.log(f'DEBUG data preview: {str(raw)[:500]}')
 
             # API có thể trả về dict hoặc list — xử lý cả hai
             if isinstance(raw, list):
