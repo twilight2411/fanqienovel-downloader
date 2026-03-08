@@ -38,6 +38,9 @@ jobs:
           key: fanqie-cookie-${{ github.run_id }}
           restore-keys: |
             fanqie-cookie-
+            
+      - name: clear old cookie
+        run: rm -f src/data/cookie.json
 
       - name: run downloader
         run: python src/main.py ${{ github.event.inputs.bookid }} ${{ github.event.inputs.save_mode }}
